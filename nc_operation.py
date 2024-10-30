@@ -7,9 +7,11 @@ import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from IPython.display import display, HTML
-
+import geopandas as gpd
+from shapely.geometry import Point
+import numpy as np
 class nc_operation:
-    def __init__(self, file_path_pattern, index_type, start_year, end_year, lat_range=[60, 49], lon_range=[245, 255], output_zarr_path="combined_data.zarr"):
+    def __init__(self, file_path_pattern, index_type, start_year, end_year, lat_range=[60, 49], lon_range=[-115, -105], output_zarr_path="combined_data.zarr"):
         """
         初始化 nc_operation 類別，並進行文件合併與處理。
         
@@ -18,7 +20,7 @@ class nc_operation:
         :param start_year: 起始年份
         :param end_year: 結束年份
         :param lat_range: 緯度範圍，預設為 [60,49] Alberta
-        :param lon_range: 經度範圍，預設為 [245, 255]  Alberta
+        :param lon_range: 經度範圍，預設為 [-115, -105] Alberta
         :param output_zarr_path: 輸出的 Zarr 文件路徑
         """
         client = Client(n_workers=4)
@@ -59,6 +61,10 @@ class nc_operation:
                 # 日期轉換
                 dataset = self.day_to_date(dataset, year)
                 
+                dataset = dataset.assign_coords(
+                Longitude=xr.where(dataset['Longitude'] > 180, dataset['Longitude'] - 360, dataset['Longitude'])
+                    )
+                
                 # 經緯度範圍擷取
                 dataset = dataset.sel(Latitude=slice(self.lat_range[0], self.lat_range[1]),
                                       Longitude=slice(self.lon_range[0], self.lon_range[1]))
@@ -94,17 +100,17 @@ class nc_operation:
         :param end_month: 結束月
         :param output_folder: 用於儲存個別地圖圖像的資料夾
         """
-        # 創建輸出目錄（若不存在）
+        # Create dir
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
 
-        # 設置起始和結束日期
+        # Start Time & End Time Setting
         start_date = pd.Timestamp(f"{start_year}-{start_month:02d}-01")
         end_date = pd.Timestamp(f"{end_year}-{end_month:02d}-01")
         dates = pd.date_range(start=start_date, end=end_date, freq='MS')
         image_paths = []
 
-        # 繪製每個日期的地圖
+        # Draw Map
         for selected_date in dates:
             isi_values = resampled_data.sel(Time=selected_date, method="nearest")
             minlat, maxlat = float(resampled_data['Latitude'].min()), float(resampled_data['Latitude'].max())
@@ -134,3 +140,42 @@ class nc_operation:
             html_content += f"<img src='{img_path}' style='margin-right: 10px; height: 200px;'/>"
         html_content += "'</divy"
         display (HTML (html_content) )
+
+    def convert_to_shapefile(self,data, output_file):
+        """
+        将 xarray Dataset 转换为 Shapefile 文件。
+        
+        :param data: xarray Dataset, 包含 'Latitude', 'Longitude' 和 'ISI' 变量
+        :param output_file: str, 输出的 Shapefile 文件路径
+        """
+        # 提取经度、纬度和 ISI 数据
+        longitudes = data['Longitude'].values
+        latitudes = data['Latitude'].values
+        isi_values = data['ISI'].values
+
+        # 确保经度和纬度形成网格
+        longitudes, latitudes = np.meshgrid(longitudes, latitudes)
+
+        # 展平数据
+        longitudes = longitudes.flatten()
+        latitudes = latitudes.flatten()
+        isi_values = isi_values.flatten()
+
+        # 过滤掉无效数据（例如 NaN 值）
+        valid_mask = ~np.isnan(isi_values)
+        longitudes = longitudes[valid_mask]
+        latitudes = latitudes[valid_mask]
+        isi_values = isi_values[valid_mask]
+
+        # 创建点几何数据
+        geometry = [Point(lon, lat) for lon, lat in zip(longitudes, latitudes)]
+        
+        # 创建 GeoDataFrame
+        gdf = gpd.GeoDataFrame({'Longitude': longitudes, 'Latitude': latitudes, 'ISI': isi_values}, geometry=geometry)
+        
+        # 设置坐标系 (WGS84)
+        gdf.set_crs("EPSG:4326", inplace=True)
+        
+        # 保存为 Shapefile
+        gdf.to_file(output_file, driver="ESRI Shapefile")
+        print(f"Shapefile 已保存至 {output_file}")
